@@ -128,6 +128,9 @@ jobs:
           import android.os.Bundle
           import android.service.notification.NotificationListenerService
           import android.service.notification.StatusBarNotification
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
 
           // كل سطر = رد. الرد الأخير بيتكرر لباقي الرسايل.
           val DEFAULT_REPLIES = listOf(
@@ -138,26 +141,38 @@ jobs:
           ).joinToString("\n")
 
           object Replier {
-              private val pkgs = setOf("com.whatsapp", "com.whatsapp.w4b")
+              val pkgs = setOf("com.whatsapp", "com.whatsapp.w4b")
 
-              fun handle(ctx: Context, pkg: String, n: Notification, postTime: Long) {
+              fun log(ctx: Context, msg: String) {
                   val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
-                  if (!p.getBoolean("on", true)) return
+                  val old = p.getString("log", "") ?: ""
+                  val line = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + " " + msg
+                  p.edit().putString("log", (line + "\n" + old).lines().take(15).joinToString("\n")).apply()
+              }
+
+              fun handle(ctx: Context, src: String, pkg: String, n: Notification, postTime: Long) {
+                  val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
                   if (pkg !in pkgs) return
-                  if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
-                  val ex = n.extras ?: return
-                  if (ex.getBoolean("android.isGroupConversation", false)) return
-                  val sender = ex.getCharSequence("android.title")?.toString() ?: return
-                  val text = ex.getCharSequence("android.text")?.toString() ?: return
-                  val action = n.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true } ?: return
+                  log(ctx, "$src: وصل إشعار واتساب")
+                  if (!p.getBoolean("on", true)) { log(ctx, "تجاهل: التطبيق مقفول"); return }
+                  if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) { log(ctx, "تجاهل: إشعار مجمّع"); return }
+                  val ex = n.extras
+                  if (ex == null) { log(ctx, "تجاهل: مفيش بيانات extras"); return }
+                  if (ex.getBoolean("android.isGroupConversation", false)) { log(ctx, "تجاهل: جروب"); return }
+                  val sender = ex.getCharSequence("android.title")?.toString()
+                  if (sender == null) { log(ctx, "تجاهل: مفيش اسم مرسل"); return }
+                  val text = ex.getCharSequence("android.text")?.toString()
+                  if (text == null) { log(ctx, "تجاهل: مفيش نص"); return }
+                  val action = n.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true }
+                  if (action == null) { log(ctx, "تجاهل: مفيش زرار رد (عدد الأزرار ${n.actions?.size ?: 0})"); return }
 
                   val replies = (p.getString("replies", DEFAULT_REPLIES) ?: DEFAULT_REPLIES)
                       .lines().map { it.trim() }.filter { it.isNotEmpty() }
-                  if (replies.isEmpty()) return
-                  if (replies.any { text.contains(it) }) return
+                  if (replies.isEmpty()) { log(ctx, "تجاهل: مفيش ردود محفوظة"); return }
+                  if (replies.any { text.contains(it) }) { log(ctx, "تجاهل: ده رد مننا"); return }
 
                   val time = if (n.`when` > 0) n.`when` else postTime
-                  if (time <= p.getLong("last_$sender", 0L)) return
+                  if (time <= p.getLong("last_$sender", 0L)) { log(ctx, "تجاهل: رسالة متكررة من $sender"); return }
 
                   val count = p.getInt("c_$sender", 0) + 1
                   p.edit().putInt("c_$sender", count).putLong("last_$sender", time).apply()
@@ -170,7 +185,9 @@ jobs:
                   RemoteInput.addResultsToIntent(ris, intent, bundle)
                   try {
                       action.actionIntent.send(ctx, 0, intent)
+                      log(ctx, "اتبعت رد رقم $count لـ $sender")
                   } catch (e: Exception) {
+                      log(ctx, "فشل الإرسال: ${e.message}")
                   }
               }
           }
@@ -181,7 +198,7 @@ jobs:
               }
 
               override fun onNotificationPosted(sbn: StatusBarNotification) {
-                  Replier.handle(this, sbn.packageName, sbn.notification, sbn.postTime)
+                  Replier.handle(this, "إشعارات", sbn.packageName, sbn.notification, sbn.postTime)
               }
           }
           EOF
@@ -195,9 +212,17 @@ jobs:
           class AccService : AccessibilityService() {
               override fun onAccessibilityEvent(event: AccessibilityEvent) {
                   if (event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
-                  val n = event.parcelableData as? Notification ?: return
                   val pkg = event.packageName?.toString() ?: return
-                  Replier.handle(this, pkg, n, System.currentTimeMillis())
+                  val n = event.parcelableData as? Notification
+                  if (n == null) {
+                      if (pkg in Replier.pkgs) Replier.log(this, "وصول: حدث واتساب بس مفيش بيانات إشعار")
+                      return
+                  }
+                  Replier.handle(this, "وصول", pkg, n, System.currentTimeMillis())
+              }
+
+              override fun onServiceConnected() {
+                  Replier.log(this, "خدمة الوصول اتوصلت")
               }
 
               override fun onInterrupt() {}
@@ -275,6 +300,18 @@ jobs:
           import android.widget.*
 
           class MainActivity : Activity() {
+              private var logView: TextView? = null
+
+              private fun showLog() {
+                  val l = getSharedPreferences("cfg", MODE_PRIVATE).getString("log", "") ?: ""
+                  logView?.text = if (l.isEmpty()) "السجل فاضي" else l
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  showLog()
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   val p = getSharedPreferences("cfg", MODE_PRIVATE)
@@ -354,6 +391,20 @@ jobs:
                       e.apply()
                       Toast.makeText(this, "اتصفّر", Toast.LENGTH_SHORT).show()
                   })
+                  root.addView(label("السجل (آخر الأحداث):"))
+                  logView = TextView(this).apply {
+                      textSize = 13f
+                      setTextIsSelectable(true)
+                      layoutDirection = View.LAYOUT_DIRECTION_RTL
+                      textDirection = View.TEXT_DIRECTION_RTL
+                  }
+                  root.addView(logView)
+                  root.addView(button("تحديث السجل") { showLog() })
+                  root.addView(button("مسح السجل") {
+                      p.edit().remove("log").apply()
+                      showLog()
+                  })
+                  showLog()
                   setContentView(ScrollView(this).apply { addView(root) })
                   keepAlive(p.getBoolean("on", true))
               }
@@ -378,7 +429,4 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
       - name: Publish release
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk AutoReply.apk
-          gh release create "v${{ github.run_number }}" AutoReply.apk --title "AutoReply v${{ github.run_number }}" --notes "APK جاهز للتحميل والتثبيت"
+          GH_TOKEN: ${{ git
