@@ -185,6 +185,7 @@ jobs:
                   RemoteInput.addResultsToIntent(ris, intent, bundle)
                   try {
                       action.actionIntent.send(ctx, 0, intent)
+                      p.edit().putInt("sent", p.getInt("sent", 0) + 1).putLong("last_sent", System.currentTimeMillis()).apply()
                       log(ctx, "اتبعت رد رقم $count لـ $sender")
                   } catch (e: Exception) {
                       log(ctx, "فشل الإرسال: ${e.message}")
@@ -249,33 +250,76 @@ jobs:
           import android.app.Notification
           import android.app.NotificationChannel
           import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.app.Service
           import android.content.BroadcastReceiver
           import android.content.Context
           import android.content.Intent
           import android.content.pm.ServiceInfo
           import android.os.Build
+          import android.os.Handler
           import android.os.IBinder
+          import android.os.Looper
+          import android.provider.Settings
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
 
           class KeepAliveService : Service() {
+              private val handler = Handler(Looper.getMainLooper())
+              private val tick = object : Runnable {
+                  override fun run() {
+                      getSystemService(NotificationManager::class.java).notify(1, build())
+                      handler.postDelayed(this, 30000)
+                  }
+              }
+
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   val nm = getSystemService(NotificationManager::class.java)
                   nm.createNotificationChannel(
-                      NotificationChannel("keep", "تشغيل في الخلفية", NotificationManager.IMPORTANCE_MIN)
+                      NotificationChannel("keep", "حالة الرد التلقائي", NotificationManager.IMPORTANCE_LOW)
                   )
-                  val n = Notification.Builder(this, "keep")
-                      .setSmallIcon(android.R.drawable.ic_dialog_info)
-                      .setContentTitle("الرد التلقائي شغال")
-                      .setOngoing(true)
-                      .build()
+                  val n = build()
                   if (Build.VERSION.SDK_INT >= 34) {
                       startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
                   } else {
                       startForeground(1, n)
                   }
+                  handler.removeCallbacks(tick)
+                  handler.postDelayed(tick, 30000)
                   return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(tick)
+                  super.onDestroy()
+              }
+
+              private fun permissionOk(): Boolean {
+                  val acc = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                  val nl = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
+                  return acc.contains("$packageName/") || nl.contains("$packageName/")
+              }
+
+              private fun build(): Notification {
+                  val p = getSharedPreferences("cfg", MODE_PRIVATE)
+                  val sent = p.getInt("sent", 0)
+                  val last = p.getLong("last_sent", 0L)
+                  val lastTxt = if (last == 0L) "لسه" else SimpleDateFormat("HH:mm", Locale.US).format(Date(last))
+                  val title = if (permissionOk()) "الرد التلقائي شغال ✅" else "⚠️ الرد التلقائي واقف: فعّل إمكانية الوصول"
+                  val pi = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return Notification.Builder(this, "keep")
+                      .setSmallIcon(android.R.drawable.ic_dialog_info)
+                      .setContentTitle(title)
+                      .setContentText("ردود اتبعتت: $sent • آخر رد: $lastTxt")
+                      .setContentIntent(pi)
+                      .setOnlyAlertOnce(true)
+                      .setOngoing(true)
+                      .build()
               }
           }
 
@@ -377,59 +421,24 @@ jobs:
                       }
                   })
                   root.addView(button("3) استثناء من توفير البطارية") {
-                      try {
-                          startActivity(
-                              Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
-                          )
-                      } catch (e: Exception) {
-                          startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                      }
-                  })
-                  root.addView(button("تصفير العدّاد (يبدأ من أول رد لكل شخص)") {
-                      val e = p.edit()
-                      p.all.keys.filter { it.startsWith("c_") || it.startsWith("last_") }.forEach { e.remove(it) }
-                      e.apply()
-                      Toast.makeText(this, "اتصفّر", Toast.LENGTH_SHORT).show()
-                  })
-                  root.addView(label("السجل (آخر الأحداث):"))
-                  logView = TextView(this).apply {
-                      textSize = 13f
-                      setTextIsSelectable(true)
-                      layoutDirection = View.LAYOUT_DIRECTION_RTL
-                      textDirection = View.TEXT_DIRECTION_RTL
-                  }
-                  root.addView(logView)
-                  root.addView(button("تحديث السجل") { showLog() })
-                  root.addView(button("مسح السجل") {
-                      p.edit().remove("log").apply()
-                      showLog()
-                  })
-                  showLog()
-                  setContentView(ScrollView(this).apply { addView(root) })
-                  keepAlive(p.getBoolean("on", true))
-              }
+                      try 
+                        startActi
+                        
+      - name: Build APK
+        run: |
+          chmod +x gradlew || true
+          gradle assembleDebug
 
-              private fun keepAlive(start: Boolean) {
-                  val i = Intent(this, KeepAliveService::class.java)
-                  try {
-                      if (start) startForegroundService(i) else stopService(i)
-                  } catch (e: Exception) {
-                  }
-              }
-          }
-          EOF
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.7"
-      - name: Build
-        run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
           name: AutoReply-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp app/build/outputs/apk/debug/app-debug.apk AutoReply.apk
-          gh release create "v${{ github.run_number }}" AutoReply.apk --title "AutoReply v${{ github.run_number }}" --notes "APK جاهز للتحميل والتثبيت"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: app/build/outputs/apk/debug/app-debug.apk
+
+        
