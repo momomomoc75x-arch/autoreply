@@ -18,7 +18,7 @@ jobs:
           java-version: 17
       - name: Create project files
         run: |
-          mkdir -p app/src/main/java/com/autoreply/bot
+          mkdir -p app/src/main/java/com/autoreply/bot app/src/main/res/xml app/src/main/res/values
           cat > settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -94,6 +94,18 @@ jobs:
                       </intent-filter>
                   </receiver>
                   <service
+                      android:name=".AccService"
+                      android:exported="true"
+                      android:label="رد تلقائي"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+                  <service
                       android:name=".ReplyService"
                       android:exported="true"
                       android:label="رد تلقائي"
@@ -125,20 +137,15 @@ jobs:
               "يلعن أبو الشغلانة دي، ما كان زماني في مكتب بدل ما أنا عمال أرد على الرسائل، مش عارف أنا عملت إيه وحش في حياتي."
           ).joinToString("\n")
 
-          class ReplyService : NotificationListenerService() {
+          object Replier {
               private val pkgs = setOf("com.whatsapp", "com.whatsapp.w4b")
 
-              override fun onListenerDisconnected() {
-                  requestRebind(ComponentName(this, ReplyService::class.java))
-              }
-
-              override fun onNotificationPosted(sbn: StatusBarNotification) {
-                  val p = getSharedPreferences("cfg", Context.MODE_PRIVATE)
+              fun handle(ctx: Context, pkg: String, n: Notification, postTime: Long) {
+                  val p = ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE)
                   if (!p.getBoolean("on", true)) return
-                  if (sbn.packageName !in pkgs) return
-                  val n = sbn.notification
+                  if (pkg !in pkgs) return
                   if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
-                  val ex = n.extras
+                  val ex = n.extras ?: return
                   if (ex.getBoolean("android.isGroupConversation", false)) return
                   val sender = ex.getCharSequence("android.title")?.toString() ?: return
                   val text = ex.getCharSequence("android.text")?.toString() ?: return
@@ -149,7 +156,7 @@ jobs:
                   if (replies.isEmpty()) return
                   if (replies.any { text.contains(it) }) return
 
-                  val time = if (n.`when` > 0) n.`when` else sbn.postTime
+                  val time = if (n.`when` > 0) n.`when` else postTime
                   if (time <= p.getLong("last_$sender", 0L)) return
 
                   val count = p.getInt("c_$sender", 0) + 1
@@ -162,11 +169,54 @@ jobs:
                   ris.forEach { bundle.putCharSequence(it.resultKey, reply) }
                   RemoteInput.addResultsToIntent(ris, intent, bundle)
                   try {
-                      action.actionIntent.send(this, 0, intent)
+                      action.actionIntent.send(ctx, 0, intent)
                   } catch (e: Exception) {
                   }
               }
           }
+
+          class ReplyService : NotificationListenerService() {
+              override fun onListenerDisconnected() {
+                  requestRebind(ComponentName(this, ReplyService::class.java))
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  Replier.handle(this, sbn.packageName, sbn.notification, sbn.postTime)
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/autoreply/bot/AccService.kt <<'EOF'
+          package com.autoreply.bot
+
+          import android.accessibilityservice.AccessibilityService
+          import android.app.Notification
+          import android.view.accessibility.AccessibilityEvent
+
+          class AccService : AccessibilityService() {
+              override fun onAccessibilityEvent(event: AccessibilityEvent) {
+                  if (event.eventType != AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) return
+                  val n = event.parcelableData as? Notification ?: return
+                  val pkg = event.packageName?.toString() ?: return
+                  Replier.handle(this, pkg, n, System.currentTimeMillis())
+              }
+
+              override fun onInterrupt() {}
+          }
+          EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeNotificationStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:notificationTimeout="100"
+              android:packageNames="com.whatsapp,com.whatsapp.w4b"
+              android:description="@string/acc_desc" />
+          EOF
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="acc_desc">بتقرا إشعارات واتساب عشان ترد عليها تلقائياً. مبتقراش أي حاجة تانية.</string>
+          </resources>
           EOF
           cat > app/src/main/java/com/autoreply/bot/KeepAliveService.kt <<'EOF'
           package com.autoreply.bot
@@ -270,8 +320,19 @@ jobs:
                       p.edit().putString("replies", et.text.toString()).apply()
                       Toast.makeText(this, "اتحفظت", Toast.LENGTH_SHORT).show()
                   })
-                  root.addView(button("1) إعطاء إذن الوصول للإشعارات") {
-                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                  root.addView(button("1) تفعيل خدمة إمكانية الوصول (الأنسب لإنفينكس)") {
+                      try {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "الشاشة دي مش متاحة في موبايلك", Toast.LENGTH_LONG).show()
+                      }
+                  })
+                  root.addView(button("1-ب) إذن الوصول للإشعارات (لو موبايلك يدعمه)") {
+                      try {
+                          startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "الشاشة دي مش متاحة في موبايلك", Toast.LENGTH_LONG).show()
+                      }
                   })
                   root.addView(button("2) السماح بالإشعارات (عشان يفضل شغال 24 ساعة)") {
                       if (Build.VERSION.SDK_INT >= 33) {
